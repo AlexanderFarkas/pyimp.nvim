@@ -4,6 +4,8 @@ Naughty imps messing with your imports while you're renaming your files.
 
 `pyimp.nvim` is a tiny Neovim helper plus Rust LSP sidecar for [`ty`](https://github.com/astral-sh/ty). It listens for `workspace/willRenameFiles` and rewrites Python imports before files or package directories are renamed.
 
+It exists to provide file/package rename refactoring that `ty` does not currently implement itself. See [`astral-sh/ty#1560`](https://github.com/astral-sh/ty/issues/1560).
+
 ## What it does
 
 - Updates Python imports on file renames.
@@ -55,14 +57,13 @@ If you want to provide your own binary:
 Push a version tag to build release binaries:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 GitHub Actions publishes macOS and Linux tarballs named like:
 
 ```text
-pyimp-lsp-x86_64-apple-darwin.tar.gz
 pyimp-lsp-aarch64-apple-darwin.tar.gz
 pyimp-lsp-x86_64-unknown-linux-gnu.tar.gz
 pyimp-lsp-aarch64-unknown-linux-gnu.tar.gz
