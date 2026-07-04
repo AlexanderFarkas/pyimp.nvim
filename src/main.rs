@@ -1,8 +1,8 @@
 use lsp_server::{Connection, Message, Request, Response};
 use lsp_types::{
     request::Request as LspRequest, FileOperationFilter, FileOperationPattern,
-    FileOperationPatternKind, FileOperationRegistrationOptions, InitializeParams,
-    RenameFilesParams, ServerCapabilities, TextDocumentSyncCapability, Url,
+    FileOperationPatternKind, FileOperationRegistrationOptions, InitializeParams, InitializeResult,
+    RenameFilesParams, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, Url,
     WorkspaceFileOperationsServerCapabilities, WorkspaceServerCapabilities,
 };
 use pyimp_lsp::{workspace_edit_for_renames, Rename};
@@ -57,7 +57,16 @@ fn main() -> anyhow_free::Result<()> {
         }),
         ..ServerCapabilities::default()
     };
-    connection.initialize_finish(id, serde_json::to_value(capabilities)?)?;
+    connection.initialize_finish(
+        id,
+        serde_json::to_value(InitializeResult {
+            capabilities,
+            server_info: Some(ServerInfo {
+                name: "pyimp-lsp".to_owned(),
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            }),
+        })?,
+    )?;
 
     for message in &connection.receiver {
         match message {

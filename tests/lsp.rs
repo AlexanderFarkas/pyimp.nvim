@@ -134,7 +134,9 @@ fn initialize_advertises_file_and_folder_rename_capabilities() {
         .unwrap(),
     );
     let response = read_message(&mut stdout);
-    let filters = &response["result"]["workspace"]["fileOperations"]["willRename"]["filters"];
+    assert_eq!(response["result"]["serverInfo"]["name"], "pyimp-lsp");
+    let filters =
+        &response["result"]["capabilities"]["workspace"]["fileOperations"]["willRename"]["filters"];
     assert!(filters.as_array().unwrap().iter().any(|filter| {
         filter["pattern"]["glob"] == "**/*.py" && filter["pattern"]["matches"] == "file"
     }));
