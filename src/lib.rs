@@ -648,17 +648,57 @@ mod tests {
     }
 
     #[test]
-    fn updates_nested_imports_inside_functions() {
+    fn updates_non_global_imports_in_nested_scopes() {
         let tmp = TempDir::new().unwrap();
         let importer = tmp.path().join("app/main.py");
+        let input = r#"class C:
+    from app.old import ClassThing
+
+if TYPE_CHECKING:
+    from app.old import TypeThing
+
+try:
+    import app.old
+except ImportError:
+    pass
+
+for item in items:
+    from app.old import LoopThing
+
+with context:
+    from app.old import WithThing
+
+def f():
+    from app.old import FunctionThing
+"#;
+        let expected = r#"class C:
+    from app.new import ClassThing
+
+if TYPE_CHECKING:
+    from app.new import TypeThing
+
+try:
+    import app.new
+except ImportError:
+    pass
+
+for item in items:
+    from app.new import LoopThing
+
+with context:
+    from app.new import WithThing
+
+def f():
+    from app.new import FunctionThing
+"#;
         let out = edit_text(
             tmp.path(),
             "app/old.py",
             "app/new.py",
             importer.to_str().unwrap(),
-            "def f():\n    from app.old import Thing\n",
+            input,
         );
-        assert_eq!(out, "def f():\n    from app.new import Thing\n");
+        assert_eq!(out, expected);
     }
 
     #[test]
