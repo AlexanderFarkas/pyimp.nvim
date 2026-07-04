@@ -142,3 +142,28 @@ fn fixture_renames_module_in_package_named_like_import_keyword() {
     );
     validate_imports(project.path());
 }
+
+#[test]
+fn fixture_renames_directory_with_absolute_relative_and_nested_imports() {
+    let project = fixture_project();
+    rename_with_workspace_edit(project.path(), "src/acme/pkg", "src/acme/renamed_pkg");
+    validate_imports(project.path());
+}
+
+#[test]
+fn fixture_moves_directory_and_rewrites_relative_imports_from_moved_files() {
+    let project = fixture_project();
+    rename_with_workspace_edit(project.path(), "src/acme/pkg", "src/acme/other/moved_pkg");
+    validate_imports(project.path());
+}
+
+#[test]
+fn fixture_renames_directory_named_like_import_keyword() {
+    let project = fixture_project();
+    rename_with_workspace_edit(
+        project.path(),
+        "src/acme/importlib",
+        "src/acme/renamed_importlib",
+    );
+    validate_imports(project.path());
+}

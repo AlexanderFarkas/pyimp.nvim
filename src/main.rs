@@ -1,9 +1,9 @@
 use lsp_server::{Connection, Message, Request, Response};
 use lsp_types::{
     request::Request as LspRequest, FileOperationFilter, FileOperationPattern,
-    FileOperationRegistrationOptions, InitializeParams, RenameFilesParams, ServerCapabilities,
-    TextDocumentSyncCapability, Url, WorkspaceFileOperationsServerCapabilities,
-    WorkspaceServerCapabilities,
+    FileOperationPatternKind, FileOperationRegistrationOptions, InitializeParams,
+    RenameFilesParams, ServerCapabilities, TextDocumentSyncCapability, Url,
+    WorkspaceFileOperationsServerCapabilities, WorkspaceServerCapabilities,
 };
 use pyimp_lsp::{workspace_edit_for_renames, Rename};
 use std::path::PathBuf;
@@ -32,14 +32,24 @@ fn main() -> anyhow_free::Result<()> {
                 will_create: None,
                 did_rename: None,
                 will_rename: Some(FileOperationRegistrationOptions {
-                    filters: vec![FileOperationFilter {
-                        scheme: Some("file".to_owned()),
-                        pattern: FileOperationPattern {
-                            glob: "**/*.py".to_owned(),
-                            matches: None,
-                            options: None,
+                    filters: vec![
+                        FileOperationFilter {
+                            scheme: Some("file".to_owned()),
+                            pattern: FileOperationPattern {
+                                glob: "**/*.py".to_owned(),
+                                matches: Some(FileOperationPatternKind::File),
+                                options: None,
+                            },
                         },
-                    }],
+                        FileOperationFilter {
+                            scheme: Some("file".to_owned()),
+                            pattern: FileOperationPattern {
+                                glob: "**".to_owned(),
+                                matches: Some(FileOperationPatternKind::Folder),
+                                options: None,
+                            },
+                        },
+                    ],
                 }),
                 did_delete: None,
                 will_delete: None,
