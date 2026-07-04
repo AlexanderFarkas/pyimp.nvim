@@ -15,6 +15,7 @@ local defaults = {
   ty_client_names = { "ty" },
   name = "pyimp-lsp",
   patch_snacks_rename = false,
+  snacks_rename_mode = "smart",
 }
 
 local config = vim.deepcopy(defaults)
@@ -102,7 +103,6 @@ local function maybe_start_for_buffer(bufnr)
   end
 end
 
-
 local function position_to_byte(text, position, position_encoding)
   local line_start = 1
   for _ = 1, position.line do
@@ -184,6 +184,19 @@ local function apply_workspace_edit_for_rename(edit, position_encoding)
   end
 end
 
+local function apply_workspace_edit_with_write_all(edit, position_encoding)
+  vim.lsp.util.apply_workspace_edit(edit, position_encoding)
+  vim.cmd("silent! wall")
+end
+
+local function apply_rename_workspace_edit(edit, position_encoding)
+  if config.snacks_rename_mode == "write_all" then
+    apply_workspace_edit_with_write_all(edit, position_encoding)
+  else
+    apply_workspace_edit_for_rename(edit, position_encoding)
+  end
+end
+
 local function patch_snacks_rename()
   local ok, rename_mod = pcall(require, "snacks.rename")
   if not ok or rename_mod.__pyimp_patched then
@@ -202,7 +215,7 @@ local function patch_snacks_rename()
       if client.supports_method("workspace/willRenameFiles") then
         local resp = client.request_sync("workspace/willRenameFiles", changes, 1000, 0)
         if resp and resp.result ~= nil then
-          apply_workspace_edit_for_rename(resp.result, client.offset_encoding)
+          apply_rename_workspace_edit(resp.result, client.offset_encoding)
         end
       end
     end
@@ -233,6 +246,9 @@ end
 
 function M.setup(opts)
   config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  if config.snacks_rename_mode ~= "smart" and config.snacks_rename_mode ~= "write_all" then
+    error("pyimp.nvim: snacks_rename_mode must be 'smart' or 'write_all'")
+  end
   setup_snacks_patch()
 
   vim.api.nvim_create_autocmd("LspAttach", {

@@ -27,11 +27,14 @@ Naughty imps messing with your imports while you're renaming your files.
 
 The install script downloads a prebuilt `pyimp-lsp` release binary into `bin/pyimp-lsp`. If no matching release binary is available, it falls back to `cargo build --release` and copies the built binary into `bin/`.
 
-If you use Snacks explorer rename and want pyimp to persist bulk `willRenameFiles` edits without loading every touched file as a buffer, enable the compatibility patch:
+If you use Snacks explorer rename and want pyimp to persist `willRenameFiles` edits before Snacks moves files, enable the compatibility patch:
 
 ```lua
 require("pyimp").setup({
   patch_snacks_rename = true,
+  -- "smart": loaded buffers are edited/saved through Neovim; unloaded files are patched on disk.
+  -- "write_all": use Neovim's normal WorkspaceEdit application, then run :wall before rename.
+  snacks_rename_mode = "smart",
 })
 ```
 
