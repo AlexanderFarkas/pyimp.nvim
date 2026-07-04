@@ -16,7 +16,7 @@ Naughty imps messing with your imports while you're renaming your files.
 
 ```lua
 {
-  "YOUR_USER/pyimp.nvim",
+  "AlexanderFarkas/pyimp.nvim",
   ft = "python",
   build = "./scripts/install.sh",
   config = function()
@@ -31,7 +31,7 @@ If you want to provide your own binary:
 
 ```lua
 {
-  "YOUR_USER/pyimp.nvim",
+  "AlexanderFarkas/pyimp.nvim",
   ft = "python",
   config = function()
     require("pyimp").setup({
