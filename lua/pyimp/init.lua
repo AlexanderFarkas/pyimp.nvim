@@ -1,7 +1,17 @@
 local M = {}
 
+local function default_cmd()
+  local source = debug.getinfo(1, "S").source:sub(2)
+  local plugin_root = vim.fn.fnamemodify(source, ":p:h:h:h")
+  local local_binary = plugin_root .. "/bin/pyimp-lsp"
+  if vim.fn.executable(local_binary) == 1 then
+    return { local_binary }
+  end
+  return { "pyimp-lsp" }
+end
+
 local defaults = {
-  cmd = { "pyimp-lsp" },
+  cmd = default_cmd(),
   ty_client_names = { "ty" },
   name = "pyimp-lsp",
 }

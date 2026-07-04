@@ -12,17 +12,22 @@ Naughty imps messing with your imports while you're renaming your files.
 - Handles `src/` layouts and namespace packages.
 - Runs as a sidecar to an already-attached `ty` client.
 
-## Install
+## Install with lazy.nvim
 
-Build the sidecar binary first:
-
-```sh
-git clone https://github.com/YOUR_USER/pyimp.nvim.git
-cd pyimp.nvim
-cargo build --release
+```lua
+{
+  "YOUR_USER/pyimp.nvim",
+  ft = "python",
+  build = "./scripts/install.sh",
+  config = function()
+    require("pyimp").setup()
+  end,
+}
 ```
 
-Then configure with lazy.nvim:
+The install script downloads a prebuilt `pyimp-lsp` release binary into `bin/pyimp-lsp`. If no matching release binary is available, it falls back to `cargo build --release` and copies the built binary into `bin/`.
+
+If you want to provide your own binary:
 
 ```lua
 {
@@ -30,20 +35,8 @@ Then configure with lazy.nvim:
   ft = "python",
   config = function()
     require("pyimp").setup({
-      cmd = { "/path/to/pyimp.nvim/target/release/pyimp-lsp" },
+      cmd = { "/path/to/pyimp-lsp" },
     })
-  end,
-}
-```
-
-If `pyimp-lsp` is on your `PATH`:
-
-```lua
-{
-  "YOUR_USER/pyimp.nvim",
-  ft = "python",
-  config = function()
-    require("pyimp").setup()
   end,
 }
 ```
@@ -52,7 +45,26 @@ If `pyimp-lsp` is on your `PATH`:
 
 - Neovim with LSP file-operation support.
 - `ty` configured as your Python LSP client.
-- Rust toolchain to build `pyimp-lsp`.
+- `curl` or `wget` for release downloads.
+- Rust toolchain only if a prebuilt binary is unavailable.
+
+## Releasing
+
+Push a version tag to build release binaries:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions publishes macOS and Linux tarballs named like:
+
+```text
+pyimp-lsp-x86_64-apple-darwin.tar.gz
+pyimp-lsp-aarch64-apple-darwin.tar.gz
+pyimp-lsp-x86_64-unknown-linux-gnu.tar.gz
+pyimp-lsp-aarch64-unknown-linux-gnu.tar.gz
+```
 
 ## Notes
 
