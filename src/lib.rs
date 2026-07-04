@@ -41,10 +41,10 @@ pub fn workspace_edit_for_renames(
             Ok(text) => text,
             Err(_) => continue,
         };
-        let Some(importer_module) = module_for_path(roots, &file) else {
+        let Some(importer_pkg) = importer_package_for_path(roots, &file) else {
             continue;
         };
-        let edits = edits_for_text(&text, &importer_module, &module_renames);
+        let edits = edits_for_text(&text, &importer_pkg, &module_renames);
         if edits.is_empty() {
             continue;
         }
@@ -96,6 +96,7 @@ fn candidate_files(roots: &[PathBuf], renames: &[ModuleRename]) -> std::io::Resu
             match Command::new("rg")
                 .arg("--files-with-matches")
                 .arg("--fixed-strings")
+                .arg("--hidden")
                 .arg("--glob")
                 .arg("*.py")
                 .arg(pattern)
@@ -137,7 +138,7 @@ fn collect_python_files(root: &Path, files: &mut HashSet<PathBuf>) -> std::io::R
     Ok(())
 }
 
-fn edits_for_text(text: &str, importer_module: &[String], renames: &[ModuleRename]) -> Vec<Edit> {
+fn edits_for_text(text: &str, importer_pkg: &[String], renames: &[ModuleRename]) -> Vec<Edit> {
     let Ok(parsed) = parse_module(text) else {
         return Vec::new();
     };
@@ -147,7 +148,7 @@ fn edits_for_text(text: &str, importer_module: &[String], renames: &[ModuleRenam
 
     let mut visitor = ImportRewriteVisitor {
         text,
-        importer_pkg: importer_package(importer_module),
+        importer_pkg: importer_pkg.to_vec(),
         renames,
         edits: Vec::new(),
     };
@@ -319,11 +320,12 @@ fn replacement_for_from_module(
     }
 }
 
-fn importer_package(module: &[String]) -> Vec<String> {
-    if module.last().map(String::as_str) == Some("__init__") {
-        module[..module.len().saturating_sub(1)].to_vec()
+fn importer_package_for_path(roots: &[PathBuf], path: &Path) -> Option<Vec<String>> {
+    let module = module_for_path(roots, path)?;
+    if path.file_name().and_then(|name| name.to_str()) == Some("__init__.py") {
+        Some(module)
     } else {
-        module[..module.len().saturating_sub(1)].to_vec()
+        Some(module[..module.len().saturating_sub(1)].to_vec())
     }
 }
 
@@ -352,7 +354,7 @@ fn module_for_path(roots: &[PathBuf], path: &Path) -> Option<Vec<String>> {
             if parts.last().map(String::as_str) == Some("__init__") {
                 parts.pop();
             }
-            if !parts.is_empty() && best.as_ref().map_or(true, |old| parts.len() < old.len()) {
+            if !parts.is_empty() && best.as_ref().is_none_or(|old| parts.len() < old.len()) {
                 best = Some(parts);
             }
         }
@@ -415,8 +417,9 @@ mod tests {
         write(&old_path, "");
         write(importer.as_ref(), "");
         let renames = module_renames(&[root.to_path_buf()], &[Rename { old_path, new_path }]);
-        let module = module_for_path(&[root.to_path_buf()], importer.as_ref()).unwrap();
-        let edits = edits_for_text(text, &module, &renames);
+        let importer_pkg =
+            importer_package_for_path(&[root.to_path_buf()], importer.as_ref()).unwrap();
+        let edits = edits_for_text(text, &importer_pkg, &renames);
         apply_edits(text, edits)
     }
 
