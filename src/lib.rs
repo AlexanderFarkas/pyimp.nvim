@@ -1,4 +1,8 @@
 use lsp_types::{Position, Range, TextEdit, Url, WorkspaceEdit};
+use ruff_python_ast::visitor::{self, Visitor};
+use ruff_python_ast::{Stmt, StmtImport, StmtImportFrom};
+use ruff_python_parser::parse_module;
+use ruff_text_size::TextSize;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -134,119 +138,155 @@ fn collect_python_files(root: &Path, files: &mut HashSet<PathBuf>) -> std::io::R
 }
 
 fn edits_for_text(text: &str, importer_module: &[String], renames: &[ModuleRename]) -> Vec<Edit> {
-    let mut edits = Vec::new();
-    let mut offset = 0usize;
-    let importer_pkg = importer_package(importer_module);
-
-    for line_with_newline in text.split_inclusive('\n') {
-        let line = line_with_newline
-            .strip_suffix('\n')
-            .unwrap_or(line_with_newline);
-        let code_end = line.find('#').unwrap_or(line.len());
-        let code = &line[..code_end];
-        let trimmed_start = code.len() - code.trim_start().len();
-        let trimmed = &code[trimmed_start..];
-
-        if let Some(rest) = trimmed.strip_prefix("import ") {
-            let base = offset + trimmed_start + "import ".len();
-            edits.extend(import_edits(rest, base, renames));
-        } else if let Some(rest) = trimmed.strip_prefix("from ") {
-            let base = offset + trimmed_start + "from ".len();
-            edits.extend(from_edits(rest, base, &importer_pkg, renames));
-        }
-
-        offset += line_with_newline.len();
+    let Ok(parsed) = parse_module(text) else {
+        return Vec::new();
+    };
+    if parsed.has_invalid_syntax() {
+        return Vec::new();
     }
 
-    edits
+    let mut visitor = ImportRewriteVisitor {
+        text,
+        importer_pkg: importer_package(importer_module),
+        renames,
+        edits: Vec::new(),
+    };
+    visitor.visit_body(&parsed.syntax().body);
+    visitor.edits
 }
 
-fn import_edits(rest: &str, base: usize, renames: &[ModuleRename]) -> Vec<Edit> {
-    let mut edits = Vec::new();
-    let mut segment_start = 0usize;
-    for segment in rest.split(',') {
-        let leading = segment.len() - segment.trim_start().len();
-        let token_start = segment_start + leading;
-        let token = segment.trim_start().split_whitespace().next().unwrap_or("");
-        if is_module_token(token) {
-            let module = split_module(token);
-            for rename in renames {
+struct ImportRewriteVisitor<'a> {
+    text: &'a str,
+    importer_pkg: Vec<String>,
+    renames: &'a [ModuleRename],
+    edits: Vec<Edit>,
+}
+
+impl<'a> Visitor<'a> for ImportRewriteVisitor<'a> {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::Import(import) => self.visit_import_stmt(import),
+            Stmt::ImportFrom(import_from) => self.visit_import_from_stmt(import_from),
+            _ => visitor::walk_stmt(self, stmt),
+        }
+    }
+}
+
+impl ImportRewriteVisitor<'_> {
+    fn visit_import_stmt(&mut self, import: &StmtImport) {
+        for alias in &import.names {
+            let module = split_module(alias.name.as_str());
+            for rename in self.renames {
                 if module == rename.old {
-                    edits.push(Edit {
-                        start: base + token_start,
-                        end: base + token_start + token.len(),
+                    self.edits.push(Edit {
+                        start: text_size_to_usize(alias.name.range.start()),
+                        end: text_size_to_usize(alias.name.range.end()),
                         replacement: rename.new.join("."),
                     });
                     break;
                 }
             }
         }
-        segment_start += segment.len() + 1;
     }
-    edits
-}
 
-fn from_edits(
-    rest: &str,
-    base: usize,
-    importer_pkg: &[String],
-    renames: &[ModuleRename],
-) -> Vec<Edit> {
-    let Some(import_pos) = rest.find(" import ") else {
-        return Vec::new();
-    };
-    let module_text = rest[..import_pos].trim();
-    if module_text.is_empty() {
-        return Vec::new();
-    }
-    let module_leading = rest[..import_pos].len() - rest[..import_pos].trim_start().len();
-    let import_list_start = import_pos + " import ".len();
-    let level = module_text.chars().take_while(|c| *c == '.').count();
-    let explicit = &module_text[level..];
-    let resolved_base = resolve_from_module(importer_pkg, level, explicit);
+    fn visit_import_from_stmt(&mut self, import_from: &StmtImportFrom) {
+        let level = import_from.level as usize;
+        let explicit = import_from
+            .module
+            .as_ref()
+            .map(|module| module.as_str())
+            .unwrap_or("");
+        let resolved_base = resolve_from_module(&self.importer_pkg, level, explicit);
+        let Some((module_start, module_end)) = from_module_range(self.text, import_from) else {
+            return;
+        };
 
-    for rename in renames {
-        if resolved_base == rename.old {
-            let replacement = replacement_for_from_module(importer_pkg, level, &rename.new);
-            return vec![Edit {
-                start: base + module_leading,
-                end: base + module_leading + module_text.len(),
-                replacement,
-            }];
-        }
+        for rename in self.renames {
+            if resolved_base == rename.old {
+                self.edits.push(Edit {
+                    start: module_start,
+                    end: module_end,
+                    replacement: replacement_for_from_module(
+                        &self.importer_pkg,
+                        level,
+                        &rename.new,
+                    ),
+                });
+                return;
+            }
 
-        if rename.old.len() == resolved_base.len() + 1 && rename.old.starts_with(&resolved_base) {
-            let old_leaf = rename.old.last().unwrap();
-            let new_leaf = rename.new.last().unwrap();
-            if let Some((start, end)) = find_imported_name(rest, import_list_start, old_leaf) {
-                return vec![Edit {
-                    start: base + start,
-                    end: base + end,
-                    replacement: new_leaf.clone(),
-                }];
+            if rename.old.len() == resolved_base.len() + 1 && rename.old.starts_with(&resolved_base)
+            {
+                let old_leaf = rename.old.last().unwrap();
+                let new_leaf = rename.new.last().unwrap();
+                if let Some(alias) = import_from
+                    .names
+                    .iter()
+                    .find(|alias| alias.name.as_str() == old_leaf)
+                {
+                    let mut edits = Vec::new();
+                    let new_parent = &rename.new[..rename.new.len() - 1];
+                    if new_parent != resolved_base {
+                        edits.push(Edit {
+                            start: module_start,
+                            end: module_end,
+                            replacement: replacement_for_from_module(
+                                &self.importer_pkg,
+                                level,
+                                new_parent,
+                            ),
+                        });
+                    }
+                    if old_leaf != new_leaf {
+                        edits.push(Edit {
+                            start: text_size_to_usize(alias.name.range.start()),
+                            end: text_size_to_usize(alias.name.range.end()),
+                            replacement: new_leaf.clone(),
+                        });
+                    }
+                    self.edits.extend(edits);
+                    return;
+                }
             }
         }
     }
-    Vec::new()
 }
 
-fn find_imported_name(rest: &str, import_list_start: usize, name: &str) -> Option<(usize, usize)> {
-    let import_list = &rest[import_list_start..];
-    let import_list = import_list.trim_start_matches('(').trim_end_matches(')');
-    let skipped_prefix = rest[import_list_start..].find(import_list).unwrap_or(0);
-    let mut segment_start = import_list_start + skipped_prefix;
-    for segment in import_list.split(',') {
-        let leading = segment.len() - segment.trim_start().len();
-        let token = segment.trim_start().split_whitespace().next().unwrap_or("");
-        if token == name {
-            return Some((
-                segment_start + leading,
-                segment_start + leading + token.len(),
-            ));
+fn from_module_range(text: &str, import_from: &StmtImportFrom) -> Option<(usize, usize)> {
+    let stmt_start = text_size_to_usize(import_from.range.start());
+    let stmt_end = text_size_to_usize(import_from.range.end());
+    let stmt = text.get(stmt_start..stmt_end)?;
+    let from_pos = stmt.find("from")?;
+    let after_from = from_pos + "from".len();
+    let import_pos = find_import_keyword(stmt, after_from)?;
+    let module_segment = &stmt[after_from..import_pos];
+    let leading = module_segment.len() - module_segment.trim_start().len();
+    let trailing = module_segment.trim_end().len();
+    Some((
+        stmt_start + after_from + leading,
+        stmt_start + after_from + trailing,
+    ))
+}
+
+fn find_import_keyword(stmt: &str, start: usize) -> Option<usize> {
+    let bytes = stmt.as_bytes();
+    let mut idx = start;
+    while idx + "import".len() <= stmt.len() {
+        if stmt[idx..].starts_with("import") {
+            let before_is_space = idx > 0 && bytes[idx - 1].is_ascii_whitespace();
+            let after = idx + "import".len();
+            let after_is_space = after < stmt.len() && bytes[after].is_ascii_whitespace();
+            if before_is_space && after_is_space {
+                return Some(idx);
+            }
         }
-        segment_start += segment.len() + 1;
+        idx += 1;
     }
     None
+}
+
+fn text_size_to_usize(size: TextSize) -> usize {
+    u32::from(size) as usize
 }
 
 fn resolve_from_module(importer_pkg: &[String], level: usize, explicit: &str) -> Vec<String> {
@@ -326,12 +366,6 @@ fn split_module(module: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(ToOwned::to_owned)
         .collect()
-}
-
-fn is_module_token(token: &str) -> bool {
-    token
-        .chars()
-        .all(|c| c == '_' || c == '.' || c.is_ascii_alphanumeric())
 }
 
 fn is_python_file(path: &Path) -> bool {
@@ -523,5 +557,181 @@ mod tests {
             "from app.old import Thing\n",
         );
         assert_eq!(out, "from app.new import Thing\n");
+    }
+
+    #[test]
+    fn updates_multiple_imports_on_one_line() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "app/new.py",
+            importer.to_str().unwrap(),
+            "import app.other, app.old as old_alias\nfrom app import other, old as alias\n",
+        );
+        assert_eq!(
+            out,
+            "import app.other, app.new as old_alias\nfrom app import other, new as alias\n"
+        );
+    }
+
+    #[test]
+    fn updates_star_import_module_path() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "app/new.py",
+            importer.to_str().unwrap(),
+            "from app.old import *\n",
+        );
+        assert_eq!(out, "from app.new import *\n");
+    }
+
+    #[test]
+    fn updates_package_init_rename() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old/__init__.py",
+            "app/new/__init__.py",
+            importer.to_str().unwrap(),
+            "import app.old\nfrom app.old import Thing\nfrom app import old\n",
+        );
+        assert_eq!(
+            out,
+            "import app.new\nfrom app.new import Thing\nfrom app import new\n"
+        );
+    }
+
+    #[test]
+    fn updates_move_across_packages_absolute_and_from_leaf() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "other/new.py",
+            importer.to_str().unwrap(),
+            "from app.old import Thing\nfrom app import old as alias\n",
+        );
+        assert_eq!(
+            out,
+            "from other.new import Thing\nfrom other import new as alias\n"
+        );
+    }
+
+    #[test]
+    fn updates_relative_import_when_move_requires_absolute() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/pkg/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "other/new.py",
+            importer.to_str().unwrap(),
+            "from .. import old\nfrom ..old import Thing\n",
+        );
+        assert_eq!(out, "from other import new\nfrom other.new import Thing\n");
+    }
+
+    #[test]
+    fn updates_move_to_same_basename_in_different_package() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "other/old.py",
+            importer.to_str().unwrap(),
+            "from app import old\nfrom app.old import Thing\n",
+        );
+        assert_eq!(out, "from other import old\nfrom other.old import Thing\n");
+    }
+
+    #[test]
+    fn ignores_comments_strings_and_triple_quoted_strings() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "app/new.py",
+            importer.to_str().unwrap(),
+            "# from app.old import X\nx = 'from app.old import X'\n\"\"\"\nfrom app.old import X\n\"\"\"\nfrom app.old import X  # real\n",
+        );
+        assert_eq!(
+            out,
+            "# from app.old import X\nx = 'from app.old import X'\n\"\"\"\nfrom app.old import X\n\"\"\"\nfrom app.new import X  # real\n"
+        );
+    }
+
+    #[test]
+    fn updates_multiline_from_package_import() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "app/new.py",
+            importer.to_str().unwrap(),
+            "from app import (\n    other,\n    old as alias,\n)\n",
+        );
+        assert_eq!(out, "from app import (\n    other,\n    new as alias,\n)\n");
+    }
+
+    #[test]
+    fn updates_deep_parent_relative_import() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/pkg/deep/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "app/old.py",
+            "app/new.py",
+            importer.to_str().unwrap(),
+            "from ...old import Thing\n",
+        );
+        assert_eq!(out, "from ...new import Thing\n");
+    }
+
+    #[test]
+    fn handles_modules_named_like_import_keyword_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        let out = edit_text(
+            tmp.path(),
+            "importlib/old.py",
+            "importlib/new.py",
+            importer.to_str().unwrap(),
+            "from importlib.old import Thing\nfrom importlib import old\n",
+        );
+        assert_eq!(
+            out,
+            "from importlib.new import Thing\nfrom importlib import new\n"
+        );
+    }
+
+    #[test]
+    fn returns_workspace_edit_for_only_actual_importers() {
+        let tmp = TempDir::new().unwrap();
+        let old_path = tmp.path().join("app/old.py");
+        let new_path = tmp.path().join("app/new.py");
+        let importing = tmp.path().join("app/importing.py");
+        let unrelated = tmp.path().join("other/importing.py");
+        write(&old_path, "");
+        write(&importing, "from app.old import Thing\n");
+        write(&unrelated, "from other.old import Thing\n");
+
+        let edit = workspace_edit_for_renames(
+            &[tmp.path().to_path_buf()],
+            &[Rename { old_path, new_path }],
+        )
+        .unwrap();
+        let changes = edit.changes.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(changes.contains_key(&Url::from_file_path(importing).unwrap()));
     }
 }
