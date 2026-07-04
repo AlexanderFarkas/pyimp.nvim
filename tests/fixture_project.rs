@@ -167,3 +167,25 @@ fn fixture_renames_directory_named_like_import_keyword() {
     );
     validate_imports(project.path());
 }
+
+#[test]
+fn fixture_renames_module_inside_namespace_package_without_init() {
+    let project = fixture_project();
+    rename_with_workspace_edit(
+        project.path(),
+        "src/acme/namespace/old.py",
+        "src/acme/namespace/new.py",
+    );
+    validate_imports(project.path());
+}
+
+#[test]
+fn fixture_renames_namespace_subpackage_directory_without_init() {
+    let project = fixture_project();
+    rename_with_workspace_edit(
+        project.path(),
+        "src/acme/namespace/subpkg",
+        "src/acme/namespace/renamed_subpkg",
+    );
+    validate_imports(project.path());
+}

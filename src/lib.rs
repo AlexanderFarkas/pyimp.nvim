@@ -676,6 +676,40 @@ mod tests {
     }
 
     #[test]
+    fn supports_namespace_package_without_init_file() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("src/ns_pkg/consumer.py");
+        let out = edit_text(
+            tmp.path(),
+            "src/ns_pkg/old.py",
+            "src/ns_pkg/new.py",
+            importer.to_str().unwrap(),
+            "from ns_pkg.old import Thing\nfrom .old import Thing as RelativeThing\n",
+        );
+        assert_eq!(
+            out,
+            "from ns_pkg.new import Thing\nfrom .new import Thing as RelativeThing\n"
+        );
+    }
+
+    #[test]
+    fn supports_namespace_package_directory_rename_without_init_file() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("src/ns_pkg/consumer.py");
+        let out = edit_text_with_dir_rename(
+            tmp.path(),
+            "src/ns_pkg/subpkg",
+            "src/ns_pkg/renamed",
+            importer.to_str().unwrap(),
+            "from ns_pkg.subpkg.mod import Thing\nfrom ns_pkg.subpkg import mod\n",
+        );
+        assert_eq!(
+            out,
+            "from ns_pkg.renamed.mod import Thing\nfrom ns_pkg.renamed import mod\n"
+        );
+    }
+
+    #[test]
     fn understands_src_layout() {
         let tmp = TempDir::new().unwrap();
         let importer = tmp.path().join("src/app/main.py");
