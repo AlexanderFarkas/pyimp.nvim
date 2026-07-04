@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ignore = "0.4"
 lsp-server = "0.7"
 lsp-types = "0.94"
 ruff_python_ast = "=0.0.3"

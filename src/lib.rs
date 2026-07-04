@@ -1,3 +1,4 @@
+use ignore::WalkBuilder;
 use lsp_types::{Position, Range, TextEdit, Url, WorkspaceEdit};
 use ruff_python_ast::visitor::{self, Visitor};
 use ruff_python_ast::{Stmt, StmtImport, StmtImportFrom};
@@ -7,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rename {
@@ -89,6 +89,9 @@ fn module_renames(roots: &[PathBuf], renames: &[Rename]) -> Vec<ModuleRename> {
                 });
             }
 
+            if !rename.old_path.is_dir() {
+                return None;
+            }
             let old = module_for_dir_path(roots, &rename.old_path)?;
             let new = module_for_dir_path(roots, &rename.new_path)?;
             (old != new).then_some(ModuleRename {
@@ -116,54 +119,74 @@ fn candidate_files(roots: &[PathBuf], renames: &[ModuleRename]) -> std::io::Resu
 
     let mut files = HashSet::new();
     for rename in renames.iter().filter(|rename| rename.is_prefix) {
-        collect_python_files(&rename.old_path, &mut files)?;
+        collect_all_python_files(&rename.old_path, &mut files)?;
     }
-
     for root in roots {
-        for pattern in &patterns {
-            match Command::new("rg")
-                .arg("--files-with-matches")
-                .arg("--fixed-strings")
-                .arg("--hidden")
-                .arg("--glob")
-                .arg("*.py")
-                .arg(pattern)
-                .arg(root)
-                .output()
-            {
-                Ok(output) if output.status.success() || output.status.code() == Some(1) => {
-                    for line in String::from_utf8_lossy(&output.stdout).lines() {
-                        files.insert(PathBuf::from(line));
-                    }
-                }
-                Ok(_) | Err(_) => collect_python_files(root, &mut files)?,
-            }
-        }
+        collect_matching_python_files(root, &patterns, &mut files)?;
     }
     Ok(files.into_iter().collect())
 }
 
-fn collect_python_files(root: &Path, files: &mut HashSet<PathBuf>) -> std::io::Result<()> {
+fn collect_all_python_files(root: &Path, files: &mut HashSet<PathBuf>) -> std::io::Result<()> {
     if root.is_file() {
         if is_python_file(root) {
             files.insert(root.to_path_buf());
         }
         return Ok(());
     }
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
+
+    for result in python_walk(root) {
+        let Ok(entry) = result else {
+            continue;
+        };
         let path = entry.path();
-        let name = entry.file_name();
-        if path.is_dir() {
-            if name == ".git" || name == ".venv" || name == "venv" || name == "__pycache__" {
-                continue;
-            }
-            collect_python_files(&path, files)?;
-        } else if is_python_file(&path) {
-            files.insert(path);
+        if path.is_file() && is_python_file(path) {
+            files.insert(path.to_path_buf());
         }
     }
     Ok(())
+}
+
+fn collect_matching_python_files(
+    root: &Path,
+    patterns: &HashSet<String>,
+    files: &mut HashSet<PathBuf>,
+) -> std::io::Result<()> {
+    if root.is_file() {
+        if is_python_file(root) && file_contains_any_pattern(root, patterns)? {
+            files.insert(root.to_path_buf());
+        }
+        return Ok(());
+    }
+
+    for result in python_walk(root) {
+        let Ok(entry) = result else {
+            continue;
+        };
+        let path = entry.path();
+        if path.is_file() && is_python_file(path) && file_contains_any_pattern(path, patterns)? {
+            files.insert(path.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn python_walk(root: &Path) -> ignore::Walk {
+    WalkBuilder::new(root)
+        .hidden(false)
+        .filter_entry(|entry| !is_skipped_dir(entry.path()))
+        .build()
+}
+
+fn file_contains_any_pattern(path: &Path, patterns: &HashSet<String>) -> std::io::Result<bool> {
+    let text = fs::read_to_string(path)?;
+    Ok(patterns.iter().any(|pattern| text.contains(pattern)))
+}
+
+fn is_skipped_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, ".git" | ".venv" | "venv" | "__pycache__"))
 }
 
 fn edits_for_text(
@@ -885,6 +908,104 @@ mod tests {
             out,
             "from app.old import Thing\nfrom app import old\nfrom .local import Local\n"
         );
+    }
+
+    #[test]
+    fn handles_multiple_file_renames_in_one_request() {
+        let tmp = TempDir::new().unwrap();
+        let importer = tmp.path().join("app/main.py");
+        write(&tmp.path().join("app/old.py"), "");
+        write(&tmp.path().join("app/pkg/stale.py"), "");
+        write(&importer, "");
+        let roots = vec![tmp.path().to_path_buf()];
+        let renames = vec![
+            Rename {
+                old_path: tmp.path().join("app/old.py"),
+                new_path: tmp.path().join("app/new.py"),
+            },
+            Rename {
+                old_path: tmp.path().join("app/pkg/stale.py"),
+                new_path: tmp.path().join("app/pkg/fresh.py"),
+            },
+        ];
+        let module_renames = module_renames(&roots, &renames);
+        let old_pkg = importer_package_for_path(&roots, &importer).unwrap();
+        let out = apply_edits(
+            "from app.old import Thing\nfrom app.pkg import stale\n",
+            edits_for_text(
+                "from app.old import Thing\nfrom app.pkg import stale\n",
+                &old_pkg,
+                &old_pkg,
+                &module_renames,
+            ),
+        );
+        assert_eq!(
+            out,
+            "from app.new import Thing\nfrom app.pkg import fresh\n"
+        );
+    }
+
+    #[test]
+    fn skips_invalid_python_file_but_rewrites_valid_importer() {
+        let tmp = TempDir::new().unwrap();
+        let old_path = tmp.path().join("app/old.py");
+        let new_path = tmp.path().join("app/new.py");
+        let valid = tmp.path().join("app/valid.py");
+        let invalid = tmp.path().join("app/invalid.py");
+        write(&old_path, "");
+        write(&valid, "from app.old import Thing\n");
+        write(&invalid, "from app.old import Thing\ndef broken(:\n");
+
+        let roots = vec![tmp.path().to_path_buf()];
+        let renames = vec![Rename { old_path, new_path }];
+        let edit = workspace_edit_for_renames(&roots, &renames).unwrap();
+        let changes = edit.changes.unwrap();
+        assert!(changes.contains_key(&Url::from_file_path(valid).unwrap()));
+        assert!(!changes.contains_key(&Url::from_file_path(invalid).unwrap()));
+    }
+
+    #[test]
+    fn computes_lsp_ranges_after_unicode_as_utf16_positions() {
+        let text = "emoji = '🦀'\nfrom app.old import Thing\n";
+        let importer_pkg = vec!["app".to_owned()];
+        let renames = vec![ModuleRename {
+            old: split_module("app.old"),
+            new: split_module("app.new"),
+            old_path: PathBuf::from("app/old.py"),
+            new_path: PathBuf::from("app/new.py"),
+            is_prefix: false,
+        }];
+        let edit = edits_for_text(text, &importer_pkg, &importer_pkg, &renames)
+            .into_iter()
+            .next()
+            .unwrap();
+        let range = byte_range_to_lsp_range(text, edit.start, edit.end);
+        assert_eq!(range.start.line, 1);
+        assert_eq!(range.start.character, 5);
+        assert_eq!(range.end.character, 12);
+    }
+
+    #[test]
+    fn ignores_non_python_file_renames_and_outside_workspace_renames() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("app/main.py"),
+            "from app.old import Thing\n",
+        );
+        let roots = vec![tmp.path().to_path_buf()];
+        let renames = vec![
+            Rename {
+                old_path: tmp.path().join("app/old.txt"),
+                new_path: tmp.path().join("app/new.txt"),
+            },
+            Rename {
+                old_path: outside.path().join("app/old.py"),
+                new_path: outside.path().join("app/new.py"),
+            },
+        ];
+        let edit = workspace_edit_for_renames(&roots, &renames).unwrap();
+        assert!(edit.changes.unwrap().is_empty());
     }
 
     #[test]
